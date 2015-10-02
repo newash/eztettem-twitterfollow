@@ -17,9 +17,11 @@ class Eztettem_Twitter_Follow {
 	const T_CHECK = 1;
 	const T_INPUT = 2;
 
-	const MAX_DELAY_TIME = 8;  // Max delay in seconds between api requests (following or unfollowing)
-	const MAX_UNFOLLOW = 4000; // Max amount of users to unfollow in one run of this script
-	const MAX_FOLLOW = 984;    // Max amount of users to follow in one run of this script
+	const MAX_DELAY_TIME = 8;     // Max delay in seconds between API requests (following or unfollowing)
+	const MAX_FOLLOW = 41;        // = 1000 / 24 as cannot follow more than 1000 in a day
+	const MAX_UNFOLLOW = 50;      // There is no specific rule for unfollow limit, but you should be careful
+	const CONSTR_TRESHOLD = 2000; // A user can follow this many without other constraints
+	const CONSTR_RATIO = 1.1;     // Over the treshold this has to be the following / follower ratio
 
 	private $twitter;
 	private $options = array(
@@ -56,23 +58,24 @@ class Eztettem_Twitter_Follow {
 		extract( $args );
 		$id = self::OPTION_PREFIX . $id;
 		if( $type === self::T_CHECK )
-			printf('<label for="%1$s"><input name="%1$s" type="checkbox" id="%1$s" value="%2$s">%3$s</label>', $id, get_option( $id ), $text );
+			printf('<label for="%1$s"><input name="%1$s" type="checkbox" id="%1$s" value="1" %2$s>%3$s</label>', $id, checked('1', get_option( $id ), false), $text );
 		elseif( $type === self::T_INPUT ) {
 			printf('<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text">', $id, get_option( $id ) );
-			if( $text )
+			if( !empty( $text ) )
 				printf( '<p class="description">%s</p>', $text );
 		}
 	}
 
 	/**
-	 * TODO
+	 * Turn cron scheduling on / off based on the setting
 	 */
 	public function update_cron( $old_value, $value ) {
 		if( $old_value === $value ) return;
-		if( $value )
+		if( $value ) {
 			wp_schedule_event( time(), 'hourly', self::CRON_EVENT );
-		else
+		} else {
 			wp_clear_scheduled_hook( self::CRON_EVENT );
+		}
 	}
 
 	/**
@@ -82,7 +85,12 @@ class Eztettem_Twitter_Follow {
 	 * - don't follow a user if he's already following me
 	 * - in one run do maximum MAX_FOLLOW or MAX_UNFOLLOW transactions
 	 * - between transactions wait a random number of seconds up to MAX_DELAY_TIME
-	 * - unfollow some non-followers if ...
+	 * - unfollow some users if follower number reaches Twitter limits
+	 *
+	 * Twitter restrictions explained:
+	 * - Twitter limits https://support.twitter.com/articles/15364
+	 * - Following rules and best practices https://support.twitter.com/articles/68916
+	 * - Do You Know the Twitter Limits http://iag.me/socialmedia/guides/do-you-know-the-twitter-limits/
 	 *
 	 * The Twitter OAuth library is only loaded here, but it's totally fine.
 	 * @see http://php.net/manual/en/function.include.php
@@ -92,42 +100,52 @@ class Eztettem_Twitter_Follow {
 
 		// Create Twitter OAuth object
 		$options = array();
-		array_walk( $this->options, function( $v, $k, &$o ) { return $o[$v['id']] = get_option( self::OPTION_PREFIX . $v['id'] ); }, &$options );
+		array_walk( $this->options, function( $o ) use ( &$options ) {
+			return $options[$o['id']] = get_option( Eztettem_Twitter_Follow::OPTION_PREFIX . $o['id'] );
+		} );
 		extract( $options );
-		$this->twitter = new Abraham\TwitterOAuth\TwitterOAuth($consumer_key, $consumer_secret, $token, $token_secret);
+		$this->twitter = new TwitterOAuth($consumer_key, $consumer_secret, $token, $token_secret);
 
-		// Start logging with initial follow data
+		// Start and log initial follow data
 		$credentials = $this->twitter->get( 'account/verify_credentials' );
+		if($credentials === null) {
+			$this->log( 'ERROR connecting to Twitter!' );
+			return;
+		}
 		$following_count = $credentials->friends_count;
 		$followers_count = $credentials->followers_count;
-		$this->log( 'cron starts - following %d & followers %d', $following_count, $followers_count );
+		$this->log( 'START cron - following %d - followers %d', $following_count, $followers_count );
 
 		// Get users I'm following with oldest first
-		$followings = $twitterAuth->get( 'friends/ids' );
+		$followings = $this->twitter->get( 'friends/ids' );
 		$followings = $followings->ids;
 		$followings = array_reverse( $followings );
 
 		// Get users following me
-		$followers = $twitterAuth->get( 'followers/ids' );
+		$followers = $this->twitter->get( 'followers/ids' );
 		$followers = $followers->ids;
 
 		// Get users following a randomly picked target user
-		$target_users = array_map( 'trim', explode(',', $eztettem_twitter_users ) );
-		$target_user = $target_users[mt_rand( 0, count( $targetusers ) - 1 )];
-		$target_followers = $twitterAuth->get( 'followers/ids', array( 'screen_name' => $target_user ) );
+		$target_users = array_map( 'trim', explode(',', $users ) );
+		$target_user = $target_users[mt_rand( 0, count( $target_users ) - 1 )];
+		$target_followers = $this->twitter->get( 'followers/ids', array( 'screen_name' => $target_user ) );
 		$target_followers = $target_followers->ids;
+		$this->log('picked user to follow followers: %s', $target_user);
 
-		// Can't follow any more if followed 2000 and under 2000 followers
-		if( $following_count - $followers_count < 600 || $followers_count < 2000 && $following_count > 1950 )
-			$this->unfollow_users( $followings, followers );
-		else
+		// Do the real stuff
+		$max_allowed = max( self::CONSTR_TRESHOLD, $followers_count * self::CONSTR_RATIO );
+		if( $following_count + self::MAX_FOLLOW < $max_allowed )
 			$this->follow_users( $target_followers, $followings );
+		else
+			$this->unfollow_users( $followings, followers );
+
+		$this->log( 'END cron' );
 	}
 
 	/**
 	 * Follow users that are I'm not following yet from the given list
 	 */
-	function follow_users( $target_followers, $followings ) {
+	private function follow_users( $target_followers, $followings ) {
 		$more_to_follow = self::MAX_FOLLOW;
 		foreach( $target_followers as $target_follower ) {
 			if( $more_to_follow <= 0 ) break;                         // It was enough to follow
@@ -137,7 +155,7 @@ class Eztettem_Twitter_Follow {
 			$more_to_follow--;
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
-			$this->log( '+++ followed a user - sleeping for %d seconds...', $delay_time );
+			$this->log( '+++ followed user %s - sleeping for %d seconds...', $target_follower, $delay_time );
 			sleep( $delay_time );
 		}
 	}
@@ -145,7 +163,7 @@ class Eztettem_Twitter_Follow {
 	/**
 	 * Unfollow users not following me
 	 */
-	function unfollow_users($followings, $followers) {
+	private function unfollow_users( $followings, $followers ) {
 		$more_to_unfollow = self::MAX_UNFOLLOW;
 		foreach( $followings as $following ) {
 			if( $more_to_unfollow <= 0 ) break;                // It was enough to unfollow
@@ -155,7 +173,7 @@ class Eztettem_Twitter_Follow {
 			$more_to_unfollow--;
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
-			$this->log( '--- unfollowed a user - sleeping for %d seconds...', $delay_time );
+			$this->log( '--- unfollowed user %s - sleeping for %d seconds...', $target_follower, $delay_time );
 			sleep( $delay_time );
 		}
 	}
@@ -164,7 +182,7 @@ class Eztettem_Twitter_Follow {
 	 * Do formatted logging in WordPress debug output
 	 * @see http://codex.wordpress.org/Debugging_in_WordPress
 	 */
-	function log() {
+	private function log() {
 		$args = func_get_args();
 		error_log( vsprintf( 'AutoTwitter: ' . array_shift( $args ), $args ) );
 	}
