@@ -71,11 +71,10 @@ class Eztettem_Twitter_Follow {
 	 */
 	public function update_cron( $old_value, $value ) {
 		if( $old_value === $value ) return;
-		if( $value ) {
+		if( $value )
 			wp_schedule_event( time(), 'hourly', self::CRON_EVENT );
-		} else {
+		else
 			wp_clear_scheduled_hook( self::CRON_EVENT );
-		}
 	}
 
 	/**
