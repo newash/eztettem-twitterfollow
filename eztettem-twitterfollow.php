@@ -13,7 +13,9 @@
 class Eztettem_Twitter_Follow {
 	const CRON_EVENT = 'twitter_event';
 	const ADMIN_ID = 'eztettem_twitter_options';
-	const OPTION_CRON_STATUS = 'eztettem_twitter_cron';
+	const OPTION_PREFIX = 'eztettem_twitter_';
+	const T_CHECK = 1;
+	const T_INPUT = 2;
 
 	const MAX_DELAY_TIME = 8;  // Max delay in seconds between api requests (following or unfollowing)
 	const MAX_UNFOLLOW = 4000; // Max amount of users to unfollow in one run of this script
@@ -21,39 +23,18 @@ class Eztettem_Twitter_Follow {
 
 	private $twitter;
 	private $options = array(
-			 array(
-			 		'id'       => self::OPTION_CRON_STATUS,
-					'name'     => 'Cron',
-					'template' => '<label for="%1$s"><input name="%1$s" type="checkbox" id="%1$s" value="%2$s">%3$s</label>',
-					'text'     => 'Enable cron'
-			), array(
-					'id'       => 'eztettem_twitter_users',
-					'name'     => 'User list',
-					'template' => '<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text"><p class="description">%3$s</p>',
-					'text'     => 'List of users, separated by commas, who\'s followers to follow'
-			), array(
-					'id'       => 'eztettem_twitter_consumer_key',
-					'name'     => 'Twitter Consumer Key',
-					'template' => '<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text">'
-			), array(
-					'id'       => 'eztettem_twitter_consumer_secret',
-					'name'     => 'Twitter Consumer Secret',
-					'template' => '<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text">'
-			), array(
-					'id'       => 'eztettem_twitter_token',
-					'name'     => 'Twitter OAuth Token',
-					'template' => '<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text">'
-			), array(
-					'id'       => 'eztettem_twitter_token_secret',
-					'name'     => 'Twitter OAuth Token Secret',
-					'template' => '<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text">'
-			)
+			array( 'id' => 'cron',            'type' => self::T_CHECK, 'name' => 'Cron',      'text' => 'Enable cron' ),
+			array( 'id' => 'users',           'type' => self::T_INPUT, 'name' => 'User list', 'text' => 'List of users, separated by commas, who\'s followers to follow' ),
+			array( 'id' => 'consumer_key',    'type' => self::T_INPUT, 'name' => 'Twitter Consumer Key' ),
+			array( 'id' => 'consumer_secret', 'type' => self::T_INPUT, 'name' => 'Twitter Consumer Secret' ),
+			array( 'id' => 'token',           'type' => self::T_INPUT, 'name' => 'Twitter OAuth Token' ),
+			array( 'id' => 'token_secret',    'type' => self::T_INPUT, 'name' => 'Twitter OAuth Token Secret' )
 	);
 
 	public function __construct() {
-		add_action( 'admin_init',                                array( &$this, 'admin_options' )        );
-		add_action( 'update_option_' . self::OPTION_CRON_STATUS, array( &$this, 'update_cron'   ), 10, 2 );
-		add_action( self::CRON_EVENT,                            array( &$this, 'do_cronjob'    )        );
+		add_action( 'admin_init',                                    array( &$this, 'admin_options' )        );
+		add_action( 'update_option_' . self::OPTION_PREFIX . 'cron', array( &$this, 'update_cron'   ), 10, 2 );
+		add_action( self::CRON_EVENT,                                array( &$this, 'do_cronjob'    )        );
 	}
 
 	/**
@@ -62,8 +43,9 @@ class Eztettem_Twitter_Follow {
 	public function admin_options() {
 		add_settings_section( self::ADMIN_ID, __( 'Twitter Auto Follow', 'eztettem' ), null, 'reading' );
 		foreach($this->options as $option) {
-			register_setting( 'reading', $option['id'] );
-			add_settings_field( $option['id'], __( $option['name'], 'eztettem' ), array( &$this, 'admin_callback' ), 'reading', self::ADMIN_ID, $option );
+			$id = self::OPTION_PREFIX . $option['id'];
+			register_setting( 'reading', $id );
+			add_settings_field( $id, __( $option['name'], 'eztettem' ), array( &$this, 'admin_callback' ), 'reading', self::ADMIN_ID, $option );
 		}
 	}
 
@@ -72,7 +54,14 @@ class Eztettem_Twitter_Follow {
 	 */
 	public function admin_callback( $args ) {
 		extract( $args );
-		printf( $template, $id, get_option( $id ), $text ? __( $text, 'eztettem' ) : '' );
+		$id = self::OPTION_PREFIX . $id;
+		if( $type === self::T_CHECK )
+			printf('<label for="%1$s"><input name="%1$s" type="checkbox" id="%1$s" value="%2$s">%3$s</label>', $id, get_option( $id ), $text );
+		elseif( $type === self::T_INPUT ) {
+			printf('<input name="%1$s" type="text" id="%1$s" value="%2$s" class="regular-text">', $id, get_option( $id ) );
+			if( $text )
+				printf( '<p class="description">%s</p>', $text );
+		}
 	}
 
 	/**
@@ -87,17 +76,25 @@ class Eztettem_Twitter_Follow {
 	}
 
 	/**
-	 * TODO
-	 * The library is only loaded here, but not to worry, it's gonna be global
+	 * Main logic
+	 *
+	 * Picks a user from the user list set in Admin and follow its followers using these rules:
+	 * - don't follow a user if he's already following me
+	 * - in one run do maximum MAX_FOLLOW or MAX_UNFOLLOW transactions
+	 * - between transactions wait a random number of seconds up to MAX_DELAY_TIME
+	 * - unfollow some non-followers if ...
+	 *
+	 * The Twitter OAuth library is only loaded here, but it's totally fine.
 	 * @see http://php.net/manual/en/function.include.php
 	 */
 	public function do_cronjob() {
-		$options = array();
-		array_walk( $this->options, function( $v, $k, &$o ) { return $o[$v['id']] = get_option( $v['id'] ); }, &$options );
-		extract( $options );
-
 		require_once('lib/TwitterOAuth.php');
-		$this->twitter = new Abraham\TwitterOAuth\TwitterOAuth($eztettem_twitter_consumer_key, $eztettem_twitter_consumer_secret, $eztettem_twitter_token, $eztettem_twitter_token_secret);
+
+		// Create Twitter OAuth object
+		$options = array();
+		array_walk( $this->options, function( $v, $k, &$o ) { return $o[$v['id']] = get_option( self::OPTION_PREFIX . $v['id'] ); }, &$options );
+		extract( $options );
+		$this->twitter = new Abraham\TwitterOAuth\TwitterOAuth($consumer_key, $consumer_secret, $token, $token_secret);
 
 		// Start logging with initial follow data
 		$credentials = $this->twitter->get( 'account/verify_credentials' );
@@ -121,16 +118,16 @@ class Eztettem_Twitter_Follow {
 		$target_followers = $target_followers->ids;
 
 		// Can't follow any more if followed 2000 and under 2000 followers
-		if( $following_count - $followers_count < 600 && $followers_count < 2000 && $following_count > 1950 )
+		if( $following_count - $followers_count < 600 || $followers_count < 2000 && $following_count > 1950 )
 			$this->unfollow_users( $followings, followers );
 		else
-			$this->follow_users( $followings, $target_followers );
+			$this->follow_users( $target_followers, $followings );
 	}
 
 	/**
-	 * TODO
+	 * Follow users that are I'm not following yet from the given list
 	 */
-	function follow_users( $followings, $target_followers ) {
+	function follow_users( $target_followers, $followings ) {
 		$more_to_follow = self::MAX_FOLLOW;
 		foreach( $target_followers as $target_follower ) {
 			if( $more_to_follow <= 0 ) break;                         // It was enough to follow
@@ -146,7 +143,7 @@ class Eztettem_Twitter_Follow {
 	}
 
 	/**
-	 * TODO
+	 * Unfollow users not following me
 	 */
 	function unfollow_users($followings, $followers) {
 		$more_to_unfollow = self::MAX_UNFOLLOW;
@@ -164,7 +161,8 @@ class Eztettem_Twitter_Follow {
 	}
 
 	/**
-	 * TODO
+	 * Do formatted logging in WordPress debug output
+	 * @see http://codex.wordpress.org/Debugging_in_WordPress
 	 */
 	function log() {
 		$args = func_get_args();
