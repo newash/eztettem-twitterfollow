@@ -145,13 +145,10 @@ class Eztettem_Twitter_Follow {
 	 * Follow users that are I'm not following yet from the given list
 	 */
 	private function follow_users( $target_followers, $followings ) {
-		$more_to_follow = self::MAX_FOLLOW;
-		foreach( $target_followers as $target_follower ) {
-			if( $more_to_follow <= 0 ) break;                         // It was enough to follow
-			if( in_array( $target_follower, $followings ) ) continue; // I'm already following this user
-
+		$target_followers = array_diff( $target_followers, $followings );
+		shuffle( $target_followers );
+		foreach( array_slice( $target_followers, 0, self::MAX_FOLLOW - 1 ) as $target_follower ) {
 			$this->twitter->post( 'friendships/create', array( 'user_id' => $target_follower ) );
-			$more_to_follow--;
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
 			$this->log( '+++ followed user %s - sleeping for %d seconds...', $target_follower, $delay_time );
@@ -163,13 +160,9 @@ class Eztettem_Twitter_Follow {
 	 * Unfollow users not following me
 	 */
 	private function unfollow_users( $followings, $followers ) {
-		$more_to_unfollow = self::MAX_UNFOLLOW;
-		foreach( $followings as $following ) {
-			if( $more_to_unfollow <= 0 ) break;                // It was enough to unfollow
-			if( in_array( $following, $followers ) ) continue; // Keep the user if he's following me
-
+		$followings = array_diff( $followings, $followers );
+		foreach( array_slice( $followings, 0, self::MAX_UNFOLLOW - 1 ) as $following ) {
 			$this->twitter->post( 'friendships/destroy', array( 'user_id' => $following ) );
-			$more_to_unfollow--;
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
 			$this->log( '--- unfollowed user %s - sleeping for %d seconds...', $target_follower, $delay_time );
