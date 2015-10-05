@@ -3,7 +3,7 @@
  * Plugin Name:  Eztettem Twitter Auto Follow
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.1.0
+ * Version:      1.1.1
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -139,27 +139,26 @@ class Eztettem_Twitter_Follow {
 		$twitter_max_allowed = max( self::CONSTR_TRESHOLD, $followers_count * self::CONSTR_RATIO );
 		$combined_max_allowed = min( $custom_max_allowed, $twitter_max_allowed );
 
-		// Do the real stuff
+		// Make some room for new followings
 		if( $following_count + self::MAX_FOLLOW > $combined_max_allowed )
 			$this->unfollow_users( $followings, $followers );
-		else {
-			// Get following or tweeting users randomly
-			$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
-			$hashtag_list = $hashtags ? array_map( 'trim', explode(',', $hashtags ) ) : array();
-			$target_index = mt_rand( 0, count( $user_list ) + count( $hashtag_list ) - 1 );
-			if( $target_index < count( $user_list ) ) {
-				$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $user_list[$target_index] ) );
-				$target_users = $target_users->ids;
-				$this->log( 'picked user to follow followers: %s', $user_list[$target_index] );
-			} else {
-				$target_index -= count( $user_list );
-				$target_users = $this->twitter->get( 'search/tweets', array( 'q' => '#' . $hashtag_list[$target_index], 'count' => 100 ) );
-				$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
-				$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
-			}
 
-			$this->follow_users( $target_users, $followings );
+		// Get following or tweeting users randomly
+		$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
+		$hashtag_list = $hashtags ? array_map( 'trim', explode(',', $hashtags ) ) : array();
+		$target_index = mt_rand( 0, count( $user_list ) + count( $hashtag_list ) - 1 );
+		if( $target_index < count( $user_list ) ) {
+			$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $user_list[$target_index] ) );
+			$target_users = $target_users->ids;
+			$this->log( 'picked user to follow followers: %s', $user_list[$target_index] );
+		} else {
+			$target_index -= count( $user_list );
+			$target_users = $this->twitter->get( 'search/tweets', array( 'q' => '#' . $hashtag_list[$target_index], 'count' => 100 ) );
+			$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
+			$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
 		}
+
+		$this->follow_users( $target_users, $followings );
 
 		$this->log( 'END cron' );
 	}
