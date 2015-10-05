@@ -3,8 +3,8 @@
  * Plugin Name:  Eztettem Twitter Auto Follow
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.0.0
- * Tested up to: 4.3
+ * Version:      1.1.0
+ * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
  * Text Domain:  eztettem
@@ -28,7 +28,8 @@ class Eztettem_Twitter_Follow {
 	private $twitter;
 	private $options = array(
 			array( 'id' => 'cron',            'type' => self::T_CHECK, 'name' => 'Cron',      'text' => 'Enable cron' ),
-			array( 'id' => 'users',           'type' => self::T_INPUT, 'name' => 'User list', 'text' => 'List of users, separated by commas, who\'s followers to follow' ),
+			array( 'id' => 'users',           'type' => self::T_INPUT, 'name' => 'User list', 'text' => 'Comma separated list of users, who\'s followers to follow' ),
+			array( 'id' => 'hashtags',        'type' => self::T_INPUT, 'name' => 'Hashtag list', 'text' => 'Comma separated list of hashtags, who\'s tweeters to follow' ),
 			array( 'id' => 'consumer_key',    'type' => self::T_INPUT, 'name' => 'Twitter Consumer Key' ),
 			array( 'id' => 'consumer_secret', 'type' => self::T_INPUT, 'name' => 'Twitter Consumer Secret' ),
 			array( 'id' => 'token',           'type' => self::T_INPUT, 'name' => 'Twitter OAuth Token' ),
@@ -133,23 +134,32 @@ class Eztettem_Twitter_Follow {
 		$followers = $this->twitter->get( 'followers/ids' );
 		$followers = $followers->ids;
 
-		// Get users following a randomly picked target user
-		$target_users = array_map( 'trim', explode(',', $users ) );
-		$target_user = $target_users[mt_rand( 0, count( $target_users ) - 1 )];
-		$target_followers = $this->twitter->get( 'followers/ids', array( 'screen_name' => $target_user ) );
-		$target_followers = $target_followers->ids;
-		$this->log('picked user to follow followers: %s', $target_user);
-
 		// Determine maximum allowed following count
 		$custom_max_allowed = max( $followers_count + self::MIN_OVERHEAD, $followers_count * self::MAX_RATIO );
 		$twitter_max_allowed = max( self::CONSTR_TRESHOLD, $followers_count * self::CONSTR_RATIO );
 		$combined_max_allowed = min( $custom_max_allowed, $twitter_max_allowed );
 
 		// Do the real stuff
-		if( $following_count + self::MAX_FOLLOW < $combined_max_allowed )
-			$this->follow_users( $target_followers, $followings );
-		else
-			$this->unfollow_users( $followings, followers );
+		if( $following_count + self::MAX_FOLLOW > $combined_max_allowed )
+			$this->unfollow_users( $followings, $followers );
+		else {
+			// Get following or tweeting users randomly
+			$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
+			$hashtag_list = $hashtags ? array_map( 'trim', explode(',', $hashtags ) ) : array();
+			$target_index = mt_rand( 0, count( $user_list ) + count( $hashtag_list ) - 1 );
+			if( $target_index < count( $user_list ) ) {
+				$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $user_list[$target_index] ) );
+				$target_users = $target_users->ids;
+				$this->log( 'picked user to follow followers: %s', $user_list[$target_index] );
+			} else {
+				$target_index -= count( $user_list );
+				$target_users = $this->twitter->get( 'search/tweets', array( 'q' => '#' . $hashtag_list[$target_index], 'count' => 100 ) );
+				$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
+				$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
+			}
+
+			$this->follow_users( $target_users, $followings );
+		}
 
 		$this->log( 'END cron' );
 	}
@@ -157,14 +167,14 @@ class Eztettem_Twitter_Follow {
 	/**
 	 * Follow users that are I'm not following yet from the given list
 	 */
-	private function follow_users( $target_followers, $followings ) {
-		$target_followers = array_diff( $target_followers, $followings );
-		shuffle( $target_followers );
-		foreach( array_slice( $target_followers, 0, self::MAX_FOLLOW - 1 ) as $target_follower ) {
-			$this->twitter->post( 'friendships/create', array( 'user_id' => $target_follower ) );
+	private function follow_users( $target_users, $followings ) {
+		$target_users = array_diff( $target_users, $followings );
+		shuffle( $target_users );
+		foreach( array_slice( $target_users, 0, self::MAX_FOLLOW - 1 ) as $target_user ) {
+			$this->twitter->post( 'friendships/create', array( 'user_id' => $target_user ) );
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
-			$this->log( '+++ followed user %s - sleeping for %d seconds...', $target_follower, $delay_time );
+			$this->log( '+++ followed user %s - sleeping for %d seconds...', $target_user, $delay_time );
 			sleep( $delay_time );
 		}
 	}
@@ -178,7 +188,7 @@ class Eztettem_Twitter_Follow {
 			$this->twitter->post( 'friendships/destroy', array( 'user_id' => $following ) );
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
-			$this->log( '--- unfollowed user %s - sleeping for %d seconds...', $target_follower, $delay_time );
+			$this->log( '--- unfollowed user %s - sleeping for %d seconds...', $following, $delay_time );
 			sleep( $delay_time );
 		}
 	}
