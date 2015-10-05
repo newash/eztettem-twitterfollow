@@ -20,6 +20,8 @@ class Eztettem_Twitter_Follow {
 	const MAX_DELAY_TIME = 8;     // Max delay in seconds between API requests (following or unfollowing)
 	const MAX_FOLLOW = 41;        // = 1000 / 24 as cannot follow more than 1000 in a day
 	const MAX_UNFOLLOW = 50;      // There is no specific rule for unfollow limit, but you should be careful
+	const MAX_RATIO = 2.0;        // Custom rule: maximum following / follower ratio so the numbers don't look bad for other Twitter users
+	const MIN_OVERHEAD = 150;     // Custom rule: additionally to MAX_RATIO allow minimum this more followings than followers
 	const CONSTR_TRESHOLD = 2000; // A user can follow this many without other constraints
 	const CONSTR_RATIO = 1.1;     // Over the treshold this has to be the following / follower ratio
 
@@ -85,11 +87,18 @@ class Eztettem_Twitter_Follow {
 	 * - in one run do maximum MAX_FOLLOW or MAX_UNFOLLOW transactions
 	 * - between transactions wait a random number of seconds up to MAX_DELAY_TIME
 	 * - unfollow some users if follower number reaches Twitter limits
+	 * - also unfollow users if our custom criteria is met
 	 *
 	 * Twitter restrictions explained:
 	 * - Twitter limits https://support.twitter.com/articles/15364
 	 * - Following rules and best practices https://support.twitter.com/articles/68916
 	 * - Do You Know the Twitter Limits http://iag.me/socialmedia/guides/do-you-know-the-twitter-limits/
+	 *
+	 * Custom criteria explained:
+	 *   If you start with just a few followers the number of "followings" can quickly go up to 2000
+	 *   and a "follower" number around 100 will just look bad for other Twitter users. To avoid that
+	 *   the ratio can only be MAX_RATIO, except for really low "follower" numbers. For those a
+	 *   +MIN_OVERHEAD is allowed to be able to grow in a sanely manner.
 	 *
 	 * The Twitter OAuth library is only loaded here, but it's totally fine.
 	 * @see http://php.net/manual/en/function.include.php
@@ -131,9 +140,13 @@ class Eztettem_Twitter_Follow {
 		$target_followers = $target_followers->ids;
 		$this->log('picked user to follow followers: %s', $target_user);
 
+		// Determine maximum allowed following count
+		$custom_max_allowed = max( $followers_count + self::MIN_OVERHEAD, $followers_count * self::MAX_RATIO );
+		$twitter_max_allowed = max( self::CONSTR_TRESHOLD, $followers_count * self::CONSTR_RATIO );
+		$combined_max_allowed = min( $custom_max_allowed, $twitter_max_allowed );
+
 		// Do the real stuff
-		$max_allowed = max( self::CONSTR_TRESHOLD, $followers_count * self::CONSTR_RATIO );
-		if( $following_count + self::MAX_FOLLOW < $max_allowed )
+		if( $following_count + self::MAX_FOLLOW < $combined_max_allowed )
 			$this->follow_users( $target_followers, $followings );
 		else
 			$this->unfollow_users( $followings, followers );
