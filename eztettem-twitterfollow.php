@@ -3,7 +3,7 @@
  * Plugin Name:  Eztettem Twitter Auto Follow
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.1.1
+ * Version:      1.2.0
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -28,8 +28,9 @@ class Eztettem_Twitter_Follow {
 	private $twitter;
 	private $options = array(
 			array( 'id' => 'cron',            'type' => self::T_CHECK, 'name' => 'Cron',      'text' => 'Enable cron' ),
-			array( 'id' => 'users',           'type' => self::T_INPUT, 'name' => 'User list', 'text' => 'Comma separated list of users, who\'s followers to follow' ),
-			array( 'id' => 'hashtags',        'type' => self::T_INPUT, 'name' => 'Hashtag list', 'text' => 'Comma separated list of hashtags, who\'s tweeters to follow' ),
+			array( 'id' => 'users',           'type' => self::T_INPUT, 'name' => 'User list', 'text' => 'Comma separated list of users, who\'s followers to follow.' ),
+			array( 'id' => 'hashtags',        'type' => self::T_INPUT, 'name' => 'Hashtag list', 'text' => 'Comma separated list of hashtags, who\'s tweeters to follow.' ),
+			array( 'id' => 'inactive',        'type' => self::T_INPUT, 'name' => 'Inactivity filter', 'text' => 'Not to follow users being inactive for this many <strong>days</strong>.' ),
 			array( 'id' => 'consumer_key',    'type' => self::T_INPUT, 'name' => 'Twitter Consumer Key' ),
 			array( 'id' => 'consumer_secret', 'type' => self::T_INPUT, 'name' => 'Twitter Consumer Secret' ),
 			array( 'id' => 'token',           'type' => self::T_INPUT, 'name' => 'Twitter OAuth Token' ),
@@ -157,19 +158,28 @@ class Eztettem_Twitter_Follow {
 			$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
 			$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
 		}
-
-		$this->follow_users( $target_users, $followings );
+		$this->follow_users( $target_users, $followings, intval( $inactive ) );
 
 		$this->log( 'END cron' );
 	}
 
 	/**
-	 * Follow users that are I'm not following yet from the given list
+	 * Follow users that are I'm not following yet from the given list,
+	 * with filtering out those inactive for the specified number of days
 	 */
-	private function follow_users( $target_users, $followings ) {
+	private function follow_users( $target_users, $followings, $inactive_days ) {
 		$target_users = array_diff( $target_users, $followings );
 		shuffle( $target_users );
-		foreach( array_slice( $target_users, 0, self::MAX_FOLLOW - 1 ) as $target_user ) {
+		if( $inactive_days ) {
+			$target_details = $this->twitter->post( 'users/lookup', array( 'user_id' => implode( ',', array_slice( $target_users, 0, 100 ) ) ) );
+			$target_users = array_map( function( $u ) {
+				return $u->id;
+			}, array_filter( $target_details, function( $t ) use ( $inactive_days ) {
+				return isset( $t->status ) && strtotime( $t->status->created_at ) > strtotime( "-$inactive_days days" );
+			} ) );
+		}
+
+		foreach( array_slice( $target_users, 0, self::MAX_FOLLOW ) as $target_user ) {
 			$this->twitter->post( 'friendships/create', array( 'user_id' => $target_user ) );
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
@@ -183,7 +193,7 @@ class Eztettem_Twitter_Follow {
 	 */
 	private function unfollow_users( $followings, $followers ) {
 		$followings = array_diff( $followings, $followers );
-		foreach( array_slice( $followings, 0, self::MAX_UNFOLLOW - 1 ) as $following ) {
+		foreach( array_slice( $followings, 0, self::MAX_UNFOLLOW ) as $following ) {
 			$this->twitter->post( 'friendships/destroy', array( 'user_id' => $following ) );
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
