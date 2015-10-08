@@ -3,7 +3,7 @@
  * Plugin Name:  Eztettem Twitter Auto Follow
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.2.0
+ * Version:      1.2.1
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -17,13 +17,12 @@ class Eztettem_Twitter_Follow {
 	const T_CHECK = 1;
 	const T_INPUT = 2;
 
-	const MAX_DELAY_TIME = 8;     // Max delay in seconds between API requests (following or unfollowing)
-	const MAX_FOLLOW = 41;        // = 1000 / 24 as cannot follow more than 1000 in a day
-	const MAX_UNFOLLOW = 50;      // There is no specific rule for unfollow limit, but you should be careful
-	const MAX_RATIO = 2.0;        // Custom rule: maximum following / follower ratio so the numbers don't look bad for other Twitter users
-	const MIN_OVERHEAD = 150;     // Custom rule: additionally to MAX_RATIO allow minimum this more followings than followers
-	const CONSTR_TRESHOLD = 2000; // A user can follow this many without other constraints
-	const CONSTR_RATIO = 1.1;     // Over the treshold this has to be the following / follower ratio
+	const MAX_DELAY_TIME = 8;      // Max delay in seconds between API requests (following or unfollowing)
+	const MAX_DAILY_FOLLOW = 1000; // Cannot follow more than 1000 in a day
+	const MAX_RATIO = 2.0;         // Custom rule: maximum following / follower ratio so the numbers don't look bad for other Twitter users
+	const MIN_OVERHEAD = 800;      // Custom rule: additionally to MAX_RATIO allow minimum this more followings than followers
+	const CONSTR_TRESHOLD = 2000;  // A user can follow this many without other constraints
+	const CONSTR_RATIO = 1.1;      // Over the treshold this has to be the following / follower ratio
 
 	private $twitter;
 	private $options = array(
@@ -97,10 +96,14 @@ class Eztettem_Twitter_Follow {
 	 * - Do You Know the Twitter Limits http://iag.me/socialmedia/guides/do-you-know-the-twitter-limits/
 	 *
 	 * Custom criteria explained:
-	 *   If you start with just a few followers the number of "followings" can quickly go up to 2000
+	 * - If you start with just a few followers the number of "followings" can quickly go up to 2000
 	 *   and a "follower" number around 100 will just look bad for other Twitter users. To avoid that
 	 *   the ratio can only be MAX_RATIO, except for really low "follower" numbers. For those a
 	 *   +MIN_OVERHEAD is allowed to be able to grow in a sanely manner.
+	 * - Twitter seems to punish following and unfollowing users in the same day. So we cannot follow
+	 *   more people in a day than the combined maximum to keep the rotation 24hrs.
+	 * - Inactive users likely won't follow back, so a parameter is used to filter out users being
+	 *   inactive for that many days.
 	 *
 	 * The Twitter OAuth library is only loaded here, but it's totally fine.
 	 * @see http://php.net/manual/en/function.include.php
@@ -135,14 +138,15 @@ class Eztettem_Twitter_Follow {
 		$followers = $this->twitter->get( 'followers/ids' );
 		$followers = $followers->ids;
 
-		// Determine maximum allowed following count
+		// Determine maximum allowed following count and the hourly number
 		$custom_max_allowed = max( $followers_count + self::MIN_OVERHEAD, $followers_count * self::MAX_RATIO );
-		$twitter_max_allowed = max( self::CONSTR_TRESHOLD, $followers_count * self::CONSTR_RATIO );
+		$twitter_max_allowed = max( $followers_count * self::CONSTR_RATIO, self::CONSTR_TRESHOLD );
 		$combined_max_allowed = min( $custom_max_allowed, $twitter_max_allowed );
+		$follow_hourly = intval( min( $combined_max_allowed - $followers_count, self::MAX_DAILY_FOLLOW ) / 24 );
 
 		// Make some room for new followings
-		if( $following_count + self::MAX_FOLLOW > $combined_max_allowed )
-			$this->unfollow_users( $followings, $followers );
+		if( $following_count + $follow_hourly > $combined_max_allowed )
+			$this->unfollow_users( $follow_hourly * 2, $followings, $followers );
 
 		// Get following or tweeting users randomly
 		$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
@@ -158,7 +162,7 @@ class Eztettem_Twitter_Follow {
 			$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
 			$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
 		}
-		$this->follow_users( $target_users, $followings, intval( $inactive ) );
+		$this->follow_users( $follow_hourly, $target_users, $followings, intval( $inactive ) );
 
 		$this->log( 'END cron' );
 	}
@@ -167,7 +171,7 @@ class Eztettem_Twitter_Follow {
 	 * Follow users that are I'm not following yet from the given list,
 	 * with filtering out those inactive for the specified number of days
 	 */
-	private function follow_users( $target_users, $followings, $inactive_days ) {
+	private function follow_users( $follow_num, $target_users, $followings, $inactive_days ) {
 		$target_users = array_diff( $target_users, $followings );
 		shuffle( $target_users );
 		if( $inactive_days ) {
@@ -179,7 +183,7 @@ class Eztettem_Twitter_Follow {
 			} ) );
 		}
 
-		foreach( array_slice( $target_users, 0, self::MAX_FOLLOW ) as $target_user ) {
+		foreach( array_slice( $target_users, 0, $follow_num ) as $target_user ) {
 			$this->twitter->post( 'friendships/create', array( 'user_id' => $target_user ) );
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
@@ -191,9 +195,9 @@ class Eztettem_Twitter_Follow {
 	/**
 	 * Unfollow users not following me
 	 */
-	private function unfollow_users( $followings, $followers ) {
+	private function unfollow_users( $unfollow_num, $followings, $followers ) {
 		$followings = array_diff( $followings, $followers );
-		foreach( array_slice( $followings, 0, self::MAX_UNFOLLOW ) as $following ) {
+		foreach( array_slice( $followings, 0, $unfollow_num ) as $following ) {
 			$this->twitter->post( 'friendships/destroy', array( 'user_id' => $following ) );
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
