@@ -3,7 +3,7 @@
  * Plugin Name:  Eztettem Twitter Auto Follow
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.2.1
+ * Version:      1.2.2
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -83,12 +83,18 @@ class Eztettem_Twitter_Follow {
 	/**
 	 * Main logic
 	 *
-	 * Picks a user from the user list set in Admin and follow its followers using these rules:
-	 * - don't follow a user if he's already following me
-	 * - in one run do maximum MAX_FOLLOW or MAX_UNFOLLOW transactions
-	 * - between transactions wait a random number of seconds up to MAX_DELAY_TIME
-	 * - unfollow some users if follower number reaches Twitter limits
-	 * - also unfollow users if our custom criteria is met
+	 * Targets can be either users to follow their followers or hashtags to follow those tweeting them.
+	 * After randomly picking a target the procedure is using these rules:
+	 * - Don't follow a user if he's already following me.
+	 * - In one run do maximum MAX_FOLLOW or MAX_UNFOLLOW transactions.
+	 * - Between transactions wait a random number of seconds up to MAX_DELAY_TIME.
+	 * - Inactive users likely won't follow back, so a parameter is used to filter out users being
+	 *   inactive for that many days.
+	 * - Unfollow some users if follower number reaches Twitter limits.
+	 * - Also unfollow users if our custom criteria is met.
+	 * - Twitter seems to punish following and unfollowing users in the same round, so a logic is applied
+	 *   to unfollow 2X users in one and follow X in the next two. Because of this the "follow rounds" are
+	 *   just 2/3 of total, so the maximum follow actions can be multiplied by 3/2 in a round.
 	 *
 	 * Twitter restrictions explained:
 	 * - Twitter limits https://support.twitter.com/articles/15364
@@ -100,10 +106,6 @@ class Eztettem_Twitter_Follow {
 	 *   and a "follower" number around 100 will just look bad for other Twitter users. To avoid that
 	 *   the ratio can only be MAX_RATIO, except for really low "follower" numbers. For those a
 	 *   +MIN_OVERHEAD is allowed to be able to grow in a sanely manner.
-	 * - Twitter seems to punish following and unfollowing users in the same day. So we cannot follow
-	 *   more people in a day than the combined maximum to keep the rotation 24hrs.
-	 * - Inactive users likely won't follow back, so a parameter is used to filter out users being
-	 *   inactive for that many days.
 	 *
 	 * The Twitter OAuth library is only loaded here, but it's totally fine.
 	 * @see http://php.net/manual/en/function.include.php
@@ -142,27 +144,28 @@ class Eztettem_Twitter_Follow {
 		$custom_max_allowed = max( $followers_count + self::MIN_OVERHEAD, $followers_count * self::MAX_RATIO );
 		$twitter_max_allowed = max( $followers_count * self::CONSTR_RATIO, self::CONSTR_TRESHOLD );
 		$combined_max_allowed = min( $custom_max_allowed, $twitter_max_allowed );
-		$follow_hourly = intval( min( $combined_max_allowed - $followers_count, self::MAX_DAILY_FOLLOW ) / 24 );
+		$follow_hourly = intval( min( ( $combined_max_allowed - $followers_count ) * 1.5, self::MAX_DAILY_FOLLOW ) / 24 );
 
-		// Make some room for new followings
+		// Make some room for new followings if needed but don't unfollow + follow in one round
 		if( $following_count + $follow_hourly > $combined_max_allowed )
 			$this->unfollow_users( $follow_hourly * 2, $followings, $followers );
-
-		// Get following or tweeting users randomly
-		$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
-		$hashtag_list = $hashtags ? array_map( 'trim', explode(',', $hashtags ) ) : array();
-		$target_index = mt_rand( 0, count( $user_list ) + count( $hashtag_list ) - 1 );
-		if( $target_index < count( $user_list ) ) {
-			$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $user_list[$target_index] ) );
-			$target_users = $target_users->ids;
-			$this->log( 'picked user to follow followers: %s', $user_list[$target_index] );
-		} else {
-			$target_index -= count( $user_list );
-			$target_users = $this->twitter->get( 'search/tweets', array( 'q' => '#' . $hashtag_list[$target_index], 'count' => 100 ) );
-			$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
-			$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
+		else {
+			// Get following or tweeting users randomly
+			$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
+			$hashtag_list = $hashtags ? array_map( 'trim', explode(',', $hashtags ) ) : array();
+			$target_index = mt_rand( 0, count( $user_list ) + count( $hashtag_list ) - 1 );
+			if( $target_index < count( $user_list ) ) {
+				$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $user_list[$target_index] ) );
+				$target_users = $target_users->ids;
+				$this->log( 'picked user to follow followers: %s', $user_list[$target_index] );
+			} else {
+				$target_index -= count( $user_list );
+				$target_users = $this->twitter->get( 'search/tweets', array( 'q' => '#' . $hashtag_list[$target_index], 'count' => 100 ) );
+				$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
+				$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
+			}
+			$this->follow_users( $follow_hourly, $target_users, $followings, intval( $inactive ) );
 		}
-		$this->follow_users( $follow_hourly, $target_users, $followings, intval( $inactive ) );
 
 		$this->log( 'END cron' );
 	}
