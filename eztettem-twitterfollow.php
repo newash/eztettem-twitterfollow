@@ -3,7 +3,7 @@
  * Plugin Name:  Eztettem Twitter Auto Follow
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.2.2
+ * Version:      1.3.0
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -18,7 +18,8 @@ class Eztettem_Twitter_Follow {
 	const T_INPUT = 2;
 
 	const MAX_DELAY_TIME = 8;      // Max delay in seconds between API requests (following or unfollowing)
-	const MAX_DAILY_FOLLOW = 1000; // Cannot follow more than 1000 in a day
+	const MAX_HOURLY_FOLLOW = 12;  // Should not be aggressive, so 12 users/hour maximum
+	const MAX_HOURLY_FAV = 10;     // Also should not be aggressive.
 	const MAX_RATIO = 2.0;         // Custom rule: maximum following / follower ratio so the numbers don't look bad for other Twitter users
 	const MIN_OVERHEAD = 800;      // Custom rule: additionally to MAX_RATIO allow minimum this more followings than followers
 	const CONSTR_TRESHOLD = 2000;  // A user can follow this many without other constraints
@@ -29,11 +30,16 @@ class Eztettem_Twitter_Follow {
 			array( 'id' => 'cron',            'type' => self::T_CHECK, 'name' => 'Cron',      'text' => 'Enable cron' ),
 			array( 'id' => 'users',           'type' => self::T_INPUT, 'name' => 'User list', 'text' => 'Comma separated list of users, who\'s followers to follow.' ),
 			array( 'id' => 'hashtags',        'type' => self::T_INPUT, 'name' => 'Hashtag list', 'text' => 'Comma separated list of hashtags, who\'s tweeters to follow.' ),
+			array( 'id' => 'geocode',         'type' => self::T_INPUT, 'name' => 'Geo location', 'text' => 'Filters the hashtag tweets. Use format <code>latitude,longitude,radius</code>.' ),
 			array( 'id' => 'inactive',        'type' => self::T_INPUT, 'name' => 'Inactivity filter', 'text' => 'Not to follow users being inactive for this many <strong>days</strong>.' ),
 			array( 'id' => 'consumer_key',    'type' => self::T_INPUT, 'name' => 'Twitter Consumer Key' ),
 			array( 'id' => 'consumer_secret', 'type' => self::T_INPUT, 'name' => 'Twitter Consumer Secret' ),
 			array( 'id' => 'token',           'type' => self::T_INPUT, 'name' => 'Twitter OAuth Token' ),
 			array( 'id' => 'token_secret',    'type' => self::T_INPUT, 'name' => 'Twitter OAuth Token Secret' )
+	);
+	private $internal_options = array(
+			array( 'id' => 'last_mention' ),
+			array( 'id' => 'last_hashtag' )
 	);
 
 	public function __construct() {
@@ -85,16 +91,19 @@ class Eztettem_Twitter_Follow {
 	 *
 	 * Targets can be either users to follow their followers or hashtags to follow those tweeting them.
 	 * After randomly picking a target the procedure is using these rules:
-	 * - Don't follow a user if he's already following me.
-	 * - In one run do maximum MAX_FOLLOW or MAX_UNFOLLOW transactions.
+	 * - Don't follow a user if he's already followed.
+	 * - In one run do maximum MAX_HOURLY_FOLLOW.
 	 * - Between transactions wait a random number of seconds up to MAX_DELAY_TIME.
 	 * - Inactive users likely won't follow back, so a parameter is used to filter out users being
 	 *   inactive for that many days.
 	 * - Unfollow some users if follower number reaches Twitter limits.
 	 * - Also unfollow users if our custom criteria is met.
-	 * - Twitter seems to punish following and unfollowing users in the same round, so a logic is applied
-	 *   to unfollow 2X users in one and follow X in the next two. Because of this the "follow rounds" are
-	 *   just 2/3 of total, so the maximum follow actions can be multiplied by 3/2 in a round.
+	 * - When unfollowing pick those having the biggest follow count, they are more likely to be bots anyway.
+	 *
+	 * Beside following users it favourites some tweets as well:
+	 * - Most importantly it favourites any new one mentioning the current user.
+	 * - If still under MAX_HOURLY_FAV limit, also favourites tweets having the given hashtags.
+	 * - Like for the follows it also tries to stay below limits -> so unfavourites if necessary.
 	 *
 	 * Twitter restrictions explained:
 	 * - Twitter limits https://support.twitter.com/articles/15364
@@ -115,7 +124,7 @@ class Eztettem_Twitter_Follow {
 
 		// Create Twitter OAuth object
 		$options = array();
-		array_walk( $this->options, function( $o ) use ( &$options ) {
+		array_walk( array_merge( $this->options, $this->internal_options ), function( $o ) use ( &$options ) {
 			return $options[$o['id']] = get_option( Eztettem_Twitter_Follow::OPTION_PREFIX . $o['id'] );
 		} );
 		extract( $options );
@@ -129,84 +138,193 @@ class Eztettem_Twitter_Follow {
 		}
 		$following_count = $credentials->friends_count;
 		$followers_count = $credentials->followers_count;
-		$this->log( 'START cron - following %d - followers %d', $following_count, $followers_count );
+		$this->log( 'START cron - following %d - followers %d - favourites %d', $following_count, $followers_count, $favourites_count );
 
-		// Get users I'm following with oldest first
+		// Get users already following with oldest first
 		$followings = $this->twitter->get( 'friends/ids' );
 		$followings = $followings->ids;
 		$followings = array_reverse( $followings );
 
-		// Get users following me
+		// Get users following the current user
 		$followers = $this->twitter->get( 'followers/ids' );
 		$followers = $followers->ids;
+
+		// Get all favourites that can be manipulated (might not be all)
+		$favourites = $this->get_my_favourite_ids();
+		$favourites_count = count( $favourites );
 
 		// Determine maximum allowed following count and the hourly number
 		$custom_max_allowed = max( $followers_count + self::MIN_OVERHEAD, $followers_count * self::MAX_RATIO );
 		$twitter_max_allowed = max( $followers_count * self::CONSTR_RATIO, self::CONSTR_TRESHOLD );
 		$combined_max_allowed = min( $custom_max_allowed, $twitter_max_allowed );
-		$follow_hourly = intval( min( ( $combined_max_allowed - $followers_count ) * 1.5, self::MAX_DAILY_FOLLOW ) / 24 );
+		$follow_hourly = min( intval( ( $combined_max_allowed - $followers_count ) * 2 / 24 ), self::MAX_HOURLY_FOLLOW );
+		$fav_hourly = min( intval( ( $combined_max_allowed - $favourites_count ) * 2 / 24 ), self::MAX_HOURLY_FAV );
 
-		// Make some room for new followings if needed but don't unfollow + follow in one round
-		if( $following_count + $follow_hourly > $combined_max_allowed )
-			$this->unfollow_users( $follow_hourly * 2, $followings, $followers );
+		// Prepare WordPress options
+		$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
+		$last_mention = (int) $last_mention; // FALSE will be zero
+		$last_hashtag = (int) $last_hashtag; // FALSE will be zero
+
+		// Decide what can be done
+		$can_follow = $following_count + $follow_hourly > $combined_max_allowed;
+		$can_fav = $favourites_count + $fav_hourly > $combined_max_allowed;
+		$follow_hashtags = mt_rand( 0, 1 ) || empty( $user_list );
+
+		// Main logic
+		if( $can_fav ) {
+			list( $favourites, $last_mention ) = $this->get_mentions( $last_mention );
+			$fav_method = array( 'favorites/create', '++# favourited' );
+		} else
+			$fav_method = array( 'favorites/destroy', '--# unfavourited' );
+		if( $can_follow )
+			$follow_method = array( 'friendships/create', '+++ followed' );
 		else {
-			// Get following or tweeting users randomly
-			$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
-			$hashtag_list = $hashtags ? array_map( 'trim', explode(',', $hashtags ) ) : array();
-			$target_index = mt_rand( 0, count( $user_list ) + count( $hashtag_list ) - 1 );
-			if( $target_index < count( $user_list ) ) {
-				$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $user_list[$target_index] ) );
-				$target_users = $target_users->ids;
-				$this->log( 'picked user to follow followers: %s', $user_list[$target_index] );
-			} else {
-				$target_index -= count( $user_list );
-				$target_users = $this->twitter->get( 'search/tweets', array( 'q' => '#' . $hashtag_list[$target_index], 'count' => 100 ) );
-				$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_users->statuses ) );
-				$this->log( 'picked hashtag to follow tweeters: #%s', $hashtag_list[$target_index] );
-			}
-			$this->follow_users( $follow_hourly, $target_users, $followings, intval( $inactive ) );
+			$target_users = $this->get_non_followers($unfollow_num, $followings, $followers);
+			$follow_method = array( 'friendships/destroy', '--- unfollowed' );
 		}
+		if( $can_fav || $can_follow && $follow_hashtags ) {
+			list( $more_tweets, $target_users, $last_hashtag ) = $this->process_hashtags( $hashtags, $geocode, $last_hashtag, $followings );
+			$tweets = array_merge( $tweets, $more_tweets );
+		}
+		if( $can_follow && !$follow_hashtags )
+			$target_users = $this->get_target_followers( $user_list, $followings, $inactive );
+
+		$this->process_objects( $target_users, $follow_hourly, 'user_id', $follow_method[0], $follow_method[1] );
+		$this->process_objects( $favourites, $fav_hourly, 'id', $fav_method[0], $fav_method[1] );
+
+		// Save internal options for the next run
+		foreach( $internal_options as $saveable )
+			update_option( Eztettem_Twitter_Follow::OPTION_PREFIX . $saveable['id'], ${$saveable['id']} );
 
 		$this->log( 'END cron' );
 	}
 
 	/**
-	 * Follow users that are I'm not following yet from the given list,
-	 * with filtering out those inactive for the specified number of days
+	 * Get all tweet IDs favourited in chronological order.
+	 * Twitter API returns these starting with the most recent ones and only 200 at a time,
+	 * so for the correct order we need to load them all in a loop and reverse the list.
 	 */
-	private function follow_users( $follow_num, $target_users, $followings, $inactive_days ) {
-		$target_users = array_diff( $target_users, $followings );
-		shuffle( $target_users );
-		if( $inactive_days ) {
-			$target_details = $this->twitter->post( 'users/lookup', array( 'user_id' => implode( ',', array_slice( $target_users, 0, 100 ) ) ) );
-			$target_users = array_map( function( $u ) {
-				return $u->id;
-			}, array_filter( $target_details, function( $t ) use ( $inactive_days ) {
-				return isset( $t->status ) && strtotime( $t->status->created_at ) > strtotime( "-$inactive_days days" );
-			} ) );
-		}
-
-		foreach( array_slice( $target_users, 0, $follow_num ) as $target_user ) {
-			$this->twitter->post( 'friendships/create', array( 'user_id' => $target_user ) );
-
-			$delay_time = rand( 3, self::MAX_DELAY_TIME );
-			$this->log( '+++ followed user %s - sleeping for %d seconds...', $target_user, $delay_time );
-			sleep( $delay_time );
-		}
+	private function get_my_favourite_ids() {
+		$api_limit = 15;
+		$fav_ids = array();
+		$fav_param = array( 'count' => 200 );
+		do {
+			if( $fav_ids )
+				$fav_param['max_id'] = array_pop( $fav_ids );
+			$favs = $this->twitter->get( 'favorites/list', $fav_param );
+			$fav_ids = array_merge( $fav_ids, array_map( function( $f ) { return $f->id; }, $favs ) );
+			$api_limit--;
+		} while( $api_limit > 0 && count( $favs ) === 200 );
+		return array_reverse( $fav_ids );
 	}
 
 	/**
-	 * Unfollow users not following me
+	 * Get IDs of tweets mentioning the current user.
+	 * Only returns the new tweets since the last run.
+	 * (For that, we persist the last ID in WordPress options.)
+	 * @return array with:
+	 *   [0] : list of tweet IDs
+	 *   [1] : last processed tweet ID to start from next time
 	 */
-	private function unfollow_users( $unfollow_num, $followings, $followers ) {
+	private function get_mentions( $last_tweet_id ) {
+		$mentions = $this->twitter->get( 'statuses/mentions_timeline', array( 'since_id' => $last_tweet_id, 'count' => 50 ) );
+		$mentions = array_map( function( $t ) { return $t->id; }, $mentions );
+		return array( $mentions, ( $mentions ? $mentions[0] : $last_tweet_id ) );
+	}
+
+	/**
+	 * Get the IDs and the user IDs of tweets containing the given hashtags.
+	 * This method serves two purposes:
+	 * 1. the returned tweet IDs can be used to favourite them
+	 * 2. the user IDs can be used to follow those users
+	 *
+	 * If it's given, the tweets are filtered with geolocation.
+	 * NOTE: geocode "53.681093,-4.174805,476km" covers Ireland and UK (mostly)
+	 *
+	 * For users, we don't need to check for inactivity because
+	 * with the right keywords chosen, the list will be always fresh.
+	 * @return array with:
+	 *   [0] : list of tweet IDs
+	 *   [1] : list of user IDs
+	 *   [2] : last processed tweet ID to start from next time
+	 */
+	private function process_hashtags( $hashtags, $geocode, $last_tweet_id, $followings ) {
+		$search_param = array(
+				'q' => preg_replace( '\s*([\S]+)\s*,\s*', '$1 OR ', $hashtags ),
+				'since_id' => $last_tweet_id,
+				'count' => 100
+		);
+		if( $geocode )
+			$search_param['geocode'] = $geocode;
+		$target_tweets = $this->twitter->get( 'search/tweets', $search_param );
+
+		$tweet_ids = array_map( function( $t ) { return $t->id; }, $target_tweets->statuses );
+		$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_tweets->statuses ) );
+		$target_users = array_diff( $target_users, $followings );
+		shuffle( $target_users );
+		return array( $tweet_ids, $target_users, ( $tweet_ids ? $tweet_ids[0] : $last_tweet_id ) );
+	}
+
+	/**
+	 * Get user IDs following one from the given list of users.
+	 * Filters out those the current user is aready following,
+	 * and those inactive for the specified number of days.
+	 */
+	private function get_target_followers( $user_list, $followings, $inactive_days ) {
+		$picked_user = $user_list[mt_rand( 0, count( $user_list ) - 1 )];
+		$this->log( 'picked user to follow followers: %s', $picked_user );
+
+		$target_users = $this->twitter->get( 'followers/ids', array( 'screen_name' => $picked_user ) );
+		$target_users = $target_users->ids;
+		$target_users = array_diff( $target_users, $followings );
+		shuffle( $target_users );
+		$inactive_days = intval( $inactive_days );
+		if( !$inactive_days )
+			return $target_users;
+
+		$target_details = $this->twitter->post( 'users/lookup', array( 'user_id' => implode( ',', array_slice( $target_users, 0, 100 ) ) ) );
+		return array_map( function( $u ) {
+			return $u->id;
+		}, array_filter( $target_details, function( $d ) use ( $inactive_days ) {
+			return isset( $d->status ) && strtotime( $d->status->created_at ) > strtotime( "-$inactive_days days" );
+		} ) );
+	}
+
+	/**
+	 * Get user IDs not following the current user,
+	 * by picking those having the most follows (probably bots) from the oldest 100.
+	 * It's effective only if $unfollow_num is much less than 100.
+	 */
+	private function get_non_followers( $followings, $followers ) {
 		$followings = array_diff( $followings, $followers );
-		foreach( array_slice( $followings, 0, $unfollow_num ) as $following ) {
-			$this->twitter->post( 'friendships/destroy', array( 'user_id' => $following ) );
+		$following_details = $this->twitter->post( 'users/lookup', array( 'user_id' => implode( ',', array_slice( $followings, 0, 100 ) ) ) );
+		usort( $following_details, function( $a, $b ) {
+			return $b->friends_count - $a->friends_count;
+		} );
+		return array_map( function( $u ) { return $u->id; }, $following_details );
+	}
+
+	/**
+	 * Process objects from the given list
+	 * @return the number of object successfully processed
+	 */
+	private function process_objects( $ids, $process_num, $id_name, $api_method, $log_name ) {
+		$success_num = 0;
+		foreach( $ids as $id ) {
+			if( $success_num == $process_num ) break;
+
+			$resp = $this->twitter->post( $api_method, array( $id_name => $id ) );
+			if( property_exists( $resp, 'errors' ) ) {
+				$this->log( '%s %s ERROR: %s', $log_name, $id, $resp->errors[0]->message );
+				continue;
+			}
+			$success_num++;
 
 			$delay_time = rand( 3, self::MAX_DELAY_TIME );
-			$this->log( '--- unfollowed user %s - sleeping for %d seconds...', $following, $delay_time );
+			$this->log( '%s %s - sleeping for %d seconds...', $log_name, $id, $delay_time );
 			sleep( $delay_time );
 		}
+		$this->log( '%s ==> %d out of %d', $log_name, $success_num, $process_num );
 	}
 
 	/**
