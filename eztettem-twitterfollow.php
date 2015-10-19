@@ -138,7 +138,6 @@ class Eztettem_Twitter_Follow {
 		}
 		$following_count = $credentials->friends_count;
 		$followers_count = $credentials->followers_count;
-		$this->log( 'START cron - following %d - followers %d - favourites %d', $following_count, $followers_count, $favourites_count );
 
 		// Get users already following with oldest first
 		$followings = $this->twitter->get( 'friends/ids' );
@@ -152,6 +151,7 @@ class Eztettem_Twitter_Follow {
 		// Get all favourites that can be manipulated (might not be all)
 		$favourites = $this->get_my_favourite_ids();
 		$favourites_count = count( $favourites );
+		$this->log( 'START cron - following %d - followers %d - favourites %d', $following_count, $followers_count, $favourites_count );
 
 		// Determine maximum allowed following count and the hourly number
 		$custom_max_allowed = max( $followers_count + self::MIN_OVERHEAD, $followers_count * self::MAX_RATIO );
@@ -162,13 +162,13 @@ class Eztettem_Twitter_Follow {
 
 		// Prepare WordPress options
 		$user_list = $users ? array_map( 'trim', explode(',', $users ) ) : array();
-		$last_mention = (int) $last_mention; // FALSE will be zero
-		$last_hashtag = (int) $last_hashtag; // FALSE will be zero
+		$last_mention = $last_mention ? $last_mention : 1;
+		$last_hashtag = $last_hashtag ? $last_hashtag : 1;
 
 		// Decide what can be done
-		$can_follow = $following_count + $follow_hourly > $combined_max_allowed;
-		$can_fav = $favourites_count + $fav_hourly > $combined_max_allowed;
-		$follow_hashtags = mt_rand( 0, 1 ) || empty( $user_list );
+		$can_follow = $following_count + $follow_hourly < $combined_max_allowed;
+		$can_fav = $favourites_count + $fav_hourly < $combined_max_allowed;
+		$follow_hashtags = mt_rand( 0, 1 );
 
 		// Main logic
 		if( $can_fav ) {
@@ -176,24 +176,24 @@ class Eztettem_Twitter_Follow {
 			$fav_method = array( 'favorites/create', '++# favourited' );
 		} else
 			$fav_method = array( 'favorites/destroy', '--# unfavourited' );
-		if( $can_follow )
+		if( $can_follow ) {
+			$target_users = empty( $user_list ) ? array() : $this->get_target_followers( $user_list, $followings, $inactive );
 			$follow_method = array( 'friendships/create', '+++ followed' );
-		else {
-			$target_users = $this->get_non_followers($unfollow_num, $followings, $followers);
+		} else {
+			$target_users = $this->get_non_followers($followings, $followers);
 			$follow_method = array( 'friendships/destroy', '--- unfollowed' );
 		}
-		if( $can_fav || $can_follow && $follow_hashtags ) {
-			list( $more_tweets, $target_users, $last_hashtag ) = $this->process_hashtags( $hashtags, $geocode, $last_hashtag, $followings );
-			$tweets = array_merge( $tweets, $more_tweets );
+		if( ( $can_fav || $can_follow && $follow_hashtags ) && !empty( $hashtags ) ) {
+			list( $tweets, $users, $last_hashtag ) = $this->process_hashtags( $hashtags, $geocode, $last_hashtag, $followings );
+			$favourites = array_merge( $favourites, $tweets );
+			$target_users = array_merge( $users, $target_users );
 		}
-		if( $can_follow && !$follow_hashtags )
-			$target_users = $this->get_target_followers( $user_list, $followings, $inactive );
 
 		$this->process_objects( $target_users, $follow_hourly, 'user_id', $follow_method[0], $follow_method[1] );
 		$this->process_objects( $favourites, $fav_hourly, 'id', $fav_method[0], $fav_method[1] );
 
 		// Save internal options for the next run
-		foreach( $internal_options as $saveable )
+		foreach( $this->internal_options as $saveable )
 			update_option( Eztettem_Twitter_Follow::OPTION_PREFIX . $saveable['id'], ${$saveable['id']} );
 
 		$this->log( 'END cron' );
@@ -250,12 +250,13 @@ class Eztettem_Twitter_Follow {
 	 */
 	private function process_hashtags( $hashtags, $geocode, $last_tweet_id, $followings ) {
 		$search_param = array(
-				'q' => preg_replace( '\s*([\S]+)\s*,\s*', '$1 OR ', $hashtags ),
+				'q' => '#' . preg_replace( '|\s*([^\s,]+)\s*,\s*|', '$1 OR #', $hashtags ),
 				'since_id' => $last_tweet_id,
 				'count' => 100
 		);
 		if( $geocode )
 			$search_param['geocode'] = $geocode;
+		$this->log( 'getting tweets with: %s', $search_param['q'] );
 		$target_tweets = $this->twitter->get( 'search/tweets', $search_param );
 
 		$tweet_ids = array_map( function( $t ) { return $t->id; }, $target_tweets->statuses );
