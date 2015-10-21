@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name:  Eztettem Twitter Auto Follow
+ * Plugin Name:  Eztettem Twitter Auto Pilot
  * Plugin URI:   http://www.eztettem.hu
- * Description:  Automate common Twitter activities such as following & unfollowing twitter accounts.
- * Version:      1.3.0
+ * Description:  Automate common Twitter activities such as following twitter accounts & favouriting tweets.
+ * Version:      1.3.1
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -52,7 +52,7 @@ class Eztettem_Twitter_Follow {
 	 * Put settings fields on 'Settings' > 'Reader'
 	 */
 	public function admin_options() {
-		add_settings_section( self::ADMIN_ID, __( 'Twitter Auto Follow', 'eztettem' ), null, 'reading' );
+		add_settings_section( self::ADMIN_ID, __( 'Twitter Auto Pilot', 'eztettem' ), null, 'reading' );
 		foreach($this->options as $option) {
 			$id = self::OPTION_PREFIX . $option['id'];
 			register_setting( 'reading', $id );
