@@ -3,7 +3,7 @@
  * Plugin Name:  Eztettem Twitter Auto Pilot
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following twitter accounts & favouriting tweets.
- * Version:      1.3.1
+ * Version:      1.3.2
  * Tested up to: 4.3.1
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
@@ -212,7 +212,7 @@ class Eztettem_Twitter_Follow {
 			if( $fav_ids )
 				$fav_param['max_id'] = array_pop( $fav_ids );
 			$favs = $this->twitter->get( 'favorites/list', $fav_param );
-			$fav_ids = array_merge( $fav_ids, array_map( function( $f ) { return $f->id; }, $favs ) );
+			$fav_ids = array_merge( $fav_ids, array_map( function( $f ) { return $f->id_str; }, $favs ) );
 			$api_limit--;
 		} while( $api_limit > 0 && count( $favs ) === 200 );
 		return array_reverse( $fav_ids );
@@ -228,7 +228,7 @@ class Eztettem_Twitter_Follow {
 	 */
 	private function get_mentions( $last_tweet_id ) {
 		$mentions = $this->twitter->get( 'statuses/mentions_timeline', array( 'since_id' => $last_tweet_id, 'count' => 50 ) );
-		$mentions = array_map( function( $t ) { return $t->id; }, $mentions );
+		$mentions = array_map( function( $t ) { return $t->id_str; }, $mentions );
 		return array( $mentions, ( $mentions ? $mentions[0] : $last_tweet_id ) );
 	}
 
@@ -259,7 +259,7 @@ class Eztettem_Twitter_Follow {
 		$this->log( 'getting tweets with: %s', $search_param['q'] );
 		$target_tweets = $this->twitter->get( 'search/tweets', $search_param );
 
-		$tweet_ids = array_map( function( $t ) { return $t->id; }, $target_tweets->statuses );
+		$tweet_ids = array_map( function( $t ) { return $t->id_str; }, $target_tweets->statuses );
 		$target_users = array_unique( array_map( function( $s ) { return $s->user->id; }, $target_tweets->statuses ) );
 		$target_users = array_diff( $target_users, $followings );
 		shuffle( $target_users );
