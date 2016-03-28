@@ -3,8 +3,8 @@
  * Plugin Name:  Eztettem Twitter Auto Pilot
  * Plugin URI:   http://www.eztettem.hu
  * Description:  Automate common Twitter activities such as following twitter accounts & favouriting tweets.
- * Version:      1.3.2
- * Tested up to: 4.3.1
+ * Version:      1.3.3
+ * Tested up to: 4.4.2
  * Author:       Enterprise Software Innovation Kft.
  * Author URI:   http://google.com/+EnterpriseSoftwareInnovationKftBudapest
  * Text Domain:  eztettem
@@ -22,7 +22,7 @@ class Eztettem_Twitter_Follow {
 	const MAX_HOURLY_FAV = 10;     // Also should not be aggressive.
 	const MAX_RATIO = 2.0;         // Custom rule: maximum following / follower ratio so the numbers don't look bad for other Twitter users
 	const MIN_OVERHEAD = 800;      // Custom rule: additionally to MAX_RATIO allow minimum this more followings than followers
-	const CONSTR_TRESHOLD = 2000;  // A user can follow this many without other constraints
+	const CONSTR_TRESHOLD = 5000;  // A user can follow this many without other constraints
 	const CONSTR_RATIO = 1.1;      // Over the treshold this has to be the following / follower ratio
 
 	private $twitter;
